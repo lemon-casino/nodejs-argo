@@ -384,6 +384,73 @@ function argoType() {
 }
 argoType();
 
+// 获取节点地理信息
+async function getLocationInfo() {
+  const sanitize = (value = '') => value.toString().trim().replace(/\s+/g, '_');
+  const buildCountryLabel = (country, region, city) => {
+    const parts = [];
+    if (country) parts.push(sanitize(country));
+    if (city) {
+      parts.push(sanitize(city));
+    } else if (region) {
+      parts.push(sanitize(region));
+    }
+    return parts.join('-');
+  };
+
+  const tryCloudflare = async () => {
+    const { data } = await axios.get('https://speed.cloudflare.com/meta', { timeout: 5000 });
+    return {
+      isp: sanitize(data.asOrganization || data.asn || ''),
+      countryLabel: buildCountryLabel(data.country, data.region, data.city)
+    };
+  };
+
+  const tryIpApi = async () => {
+    const { data } = await axios.get('https://ipapi.co/json/', { timeout: 5000 });
+    return {
+      isp: sanitize(data.org || data.asn || ''),
+      countryLabel: buildCountryLabel(data.country_code || data.country, data.region, data.city)
+    };
+  };
+
+  const tryShellFallback = () => {
+    const fallbackCmd = "curl -sm 5 https://speed.cloudflare.com/meta";
+    const raw = execSync(fallbackCmd, { encoding: 'utf-8' }).trim();
+
+    try {
+      const parsed = JSON.parse(raw);
+      return {
+        isp: sanitize(parsed.asOrganization || parsed.asn || ''),
+        countryLabel: buildCountryLabel(parsed.country, parsed.region, parsed.city)
+      };
+    } catch (parseError) {
+      const parts = raw.replace(/\s+/g, '_').split('-');
+      return {
+        isp: sanitize(parts.pop()),
+        countryLabel: sanitize(parts.join('-'))
+      };
+    }
+  };
+
+  try {
+    const cfResult = await tryCloudflare();
+    if (cfResult.isp || cfResult.countryLabel) return cfResult;
+  } catch {}
+
+  try {
+    const ipApiResult = await tryIpApi();
+    if (ipApiResult.isp || ipApiResult.countryLabel) return ipApiResult;
+  } catch {}
+
+  try {
+    const shellResult = tryShellFallback();
+    return shellResult;
+  } catch {
+    return { isp: '', countryLabel: '' };
+  }
+}
+
 // 获取临时隧道domain
 async function extractDomains() {
   let argoDomain;
@@ -444,13 +511,14 @@ async function extractDomains() {
 
   // 生成 list 和 sub 信息
   async function generateLinks(argoDomain) {
-    const metaInfo = execSync(
-      'curl -sm 5 https://speed.cloudflare.com/meta | awk -F\\" \'{print $26"-"$18}\' | sed -e \'s/ /_/g\'',
-      { encoding: 'utf-8' }
-    );
-    const ISP = metaInfo.trim();
-    // 如果 NAME 为空，则只使用 ISP 作为名称
-    const nodeName = NAME ? `${NAME}-${ISP}` : ISP;
+    const location = await getLocationInfo();
+    const nameParts = [];
+
+    if (NAME) nameParts.push(NAME);
+    if (location.countryLabel) nameParts.push(location.countryLabel);
+    if (location.isp) nameParts.push(location.isp);
+
+    const nodeName = nameParts.filter(Boolean).join('-') || NAME || 'node';
 
     return new Promise((resolve) => {
       setTimeout(() => {
